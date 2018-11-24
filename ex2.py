@@ -8,6 +8,15 @@ import copy
 IMAX = 1300
 
 
+##############
+# USER GUIDE #
+##############
+# All functions expect to get a path to the nii.gz file they are supposed to receive.
+# Please provide either a full path or put the nii.gz files in the same directory as the ex2.py file for the functions
+# to read the files properly
+# main function can be activated in the end of this file to run the code
+
+
 def SegmentationByTH(path, Imin, Imax):
     """
     A function that segments the given nifti file using the given thresholds and saves the segmented image.
@@ -30,7 +39,7 @@ def SegmentationByTH(path, Imin, Imax):
     return img_data
 
 
-def SkeletonTHFinder(path):  # todo: delete print!
+def SkeletonTHFinder(path):
     """
     A fucnction that iterates over different imin values, chooses the best one of them and then creates a skeleton
     segmentation of the given file using the best imin and morphological operations
@@ -45,7 +54,6 @@ def SkeletonTHFinder(path):  # todo: delete print!
     imin_list = []
     for imin in range(150, 500, 14):
         imin_list.append(imin)
-        print(imin)  # todo: delete print!
         segmentation = SegmentationByTH(path, imin, IMAX)
         labels, connected_components_num = measure.label(segmentation, return_num=True)
         connected_components_list.append(connected_components_num)
@@ -69,7 +77,7 @@ def SkeletonTHFinder(path):  # todo: delete print!
     im_data = best_segmentation.get_data()
     selem = morphology.cube(7)
 
-    # perform image closing in order to fill holes and connect related areas
+    # morphological operations:
     closing_flags = morphology.binary_closing(im_data, selem)
     im_data[::] = 0
     im_data[closing_flags] = 1
@@ -123,6 +131,8 @@ def AortaSegmentation(CT_path, L1_path):
         if best_segmentation_slice_area < current_slice_area:
             best_segmentation_slice_area = current_slice_area
             best_segmentation_slice = L1_data[:, :, slc]
+
+    # find the ROI according to the best segmentation slice of L1
     ROI_borders = find_ROI_borders(best_segmentation_slice)
 
     # segment the aorta in all slices
@@ -149,7 +159,7 @@ def segment_aorta(axial_slice, ROI_borders, upper_slice=None):
     min_row, max_row, min_col, max_col = ROI_borders
     ROI = copy.deepcopy(axial_slice[min_row:max_row, min_col:max_col])
 
-    # create histogram of the ROI and define the thresholds for the aorta gray levels:
+    # create histogram of the ROI and define the thresholds for the aorta's gray levels:
     ROI_hist = np.histogram(ROI, 60, [0, 180], density=True)
     maximas_list = argrelextrema(ROI_hist[0], np.greater)[0]
     max_th = ROI_hist[0][maximas_list[-1]]
@@ -265,7 +275,12 @@ def evaluateSegmentation(ground_truth_segmentation_path, estimated_segmentation_
     return VOD, dice_coefficient
 
 
-if __name__ == '__main__':
-    path = "Case1_CT.nii.gz"
-    print('best imin: ', SkeletonTHFinder(path))
-    print(evaluateSegmentation('Case1_Aorta.nii.gz', 'Case1_CT_aorta_segmentation.nii.gz'))
+
+##############################################################################
+# uncomment 'main' and fill case number instead '#' for running the program  #
+##############################################################################
+# if __name__ == '__main__':
+    # path = "Case#_CT.nii.gz"
+    # print('best imin: ', SkeletonTHFinder(path))
+    # AortaSegmentation(path, 'Case#_L1.nii.gz')
+    # print(evaluateSegmentation('Case#_Aorta.nii.gz', 'Case#_CT_aorta_segmentation.nii.gz'))
