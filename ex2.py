@@ -3,7 +3,7 @@ import numpy as np
 from skimage import measure, morphology
 import matplotlib.pyplot as plt
 from scipy.signal import argrelextrema
-
+import copy
 
 IMAX = 1300
 
@@ -30,7 +30,7 @@ def SegmentationByTH(path, Imin, Imax):
     return img_data
 
 
-def SkeletonTHFinder(path):
+def SkeletonTHFinder(path):  # todo: delete print!
     """
     A fucnction that iterates over different imin values, chooses the best one of them and then creates a skeleton
     segmentation of the given file using the best imin and morphological operations
@@ -45,7 +45,7 @@ def SkeletonTHFinder(path):
     imin_list = []
     for imin in range(150, 500, 14):
         imin_list.append(imin)
-        print(imin)
+        print(imin)  # todo: delete print!
         segmentation = SegmentationByTH(path, imin, IMAX)
         labels, connected_components_num = measure.label(segmentation, return_num=True)
         connected_components_list.append(connected_components_num)
@@ -90,7 +90,182 @@ def SkeletonTHFinder(path):
     return best_imin
 
 
-if __name__ == '__main__':
-    path = "Case2_CT.nii.gz"
-    print('best imin: ', SkeletonTHFinder(path))
+def AortaSegmentation(CT_path, L1_path):
+    """
+    A function that produces the segmentation of the aorta in the slices where L1 is segmented and saves it as a new file
+    :param CT_path: The CT scan in which the aorta should be segmented
+    :param L1_path: The L1 segmentation that was provided
+    """
+    file_name = CT_path.split('.')[0]
 
+    ct_scan = nib.load(CT_path)
+    L1_segmentation = nib.load(L1_path)
+    ct_data = ct_scan.get_data()
+    L1_data = L1_segmentation.get_data()
+
+    # find borders of L1:
+    lower_border = 0
+    while np.array_equal(L1_data[:, :, lower_border], np.zeros((L1_data.shape[0], L1_data.shape[1]))):
+        lower_border += 1
+    upper_border = lower_border
+    while not np.array_equal(L1_data[:, :, upper_border], np.zeros((L1_data.shape[0], L1_data.shape[1]))):
+        upper_border += 1
+
+    # clear original CT scan in all slices except the slices that should be segmented:
+    ct_data[:, :, :lower_border] = 0
+    ct_data[:, :, upper_border:] = 0
+
+    # find slice with best segmentation of L1
+    best_segmentation_slice = L1_data[:, :, lower_border]
+    best_segmentation_slice_area = L1_data[:, :, lower_border].sum()
+    for slc in range(lower_border + 1, upper_border + 1):
+        current_slice_area = L1_data[:, :, slc].sum()
+        if best_segmentation_slice_area < current_slice_area:
+            best_segmentation_slice_area = current_slice_area
+            best_segmentation_slice = L1_data[:, :, slc]
+    ROI_borders = find_ROI_borders(best_segmentation_slice)
+
+    # segment the aorta in all slices
+    for slc in range(upper_border - 1, lower_border - 1, -1):
+        if slc == upper_border - 1:
+            ct_data[:, :, slc] = segment_aorta(ct_data[:, :, slc], ROI_borders)
+            continue
+        ct_data[:, :, slc] = segment_aorta(ct_data[:, :, slc], ROI_borders, copy.deepcopy(ct_data[:, :, slc + 1]))
+
+    ct_data[ct_data != 0] = 1
+
+    nib.save(ct_scan, file_name + '_aorta_segmentation.nii.gz')
+
+
+def segment_aorta(axial_slice, ROI_borders, upper_slice=None):
+    """
+    A function that segments the aorta in the given slice
+    :param axial_slice: The slice in which the aorta should be segmented
+    :param ROI_borders: a list containing the borders of the desired ROI to look for the aorta in
+    :param upper_slice: if the current slice that should be segmented isn't the upper slice of L1, the upper slice is
+    provided in order to verify that the segmentation of the slice is accurate
+    :return: The aorta segmentation of the given slice
+    """
+    min_row, max_row, min_col, max_col = ROI_borders
+    ROI = copy.deepcopy(axial_slice[min_row:max_row, min_col:max_col])
+
+    # create histogram of the ROI and define the thresholds for the aorta gray levels:
+    ROI_hist = np.histogram(ROI, 60, [0, 180], density=True)
+    maximas_list = argrelextrema(ROI_hist[0], np.greater)[0]
+    max_th = ROI_hist[0][maximas_list[-1]]
+    i = 1
+    while max_th < 0.004:  # check that the local maximum that was found is part of the aorta
+        i += 1
+        max_th = ROI_hist[0][maximas_list[-i]]
+    lower_th = ROI_hist[1][maximas_list[-i]] - 20
+    upper_th = ROI_hist[1][maximas_list[-i]] + 35
+
+    # segment the aorta according to the thresholds that were found:
+    ROI[ROI < lower_th] = 0
+    ROI[ROI > upper_th] = 0
+    ROI[ROI != 0] = 1
+
+    # perform morphological operations on the segmented image:
+    ROI[:, :] = morphology.closing(ROI, selem=morphology.disk(2))
+    ROI[:, :], new_connected_components_num = measure.label(ROI, return_num=True)
+    ROI[:, :] = morphology.remove_small_objects(ROI.astype(np.uint16))
+
+    # find biggest connectivity component that is round and remove all others:
+    ROI[:, :], new_connected_components_num = measure.label(ROI, return_num=True)
+    props = measure.regionprops(ROI.astype(np.uint16), coordinates='rc')
+    area_list = [region.area for region in props]
+    eccentricity_list = [region.eccentricity for region in props]
+    aorta_area = 0
+    while len(area_list) > 0:
+        current_max_area = area_list.index(max(area_list))
+        current_optimal_circle = eccentricity_list.index(min(eccentricity_list))
+        if current_max_area == current_optimal_circle:
+            aorta_area = area_list[current_max_area]
+            break
+        area_list.pop(current_max_area)
+        eccentricity_list.pop(current_max_area)
+    for region in props:
+        if region.area != aorta_area:
+            ROI[ROI == region.label] = 0
+
+    # apply the segmentation of the ROI on the given slice
+    axial_slice[:, :] = 0
+    axial_slice[min_row:max_row, min_col:max_col] = ROI
+
+    # compare the segmentation of the current slice to the segmentation of the upper slice:
+    if upper_slice is not None:
+        intersection_flags = np.logical_and(axial_slice, upper_slice)
+        union_flags = np.logical_or(axial_slice, upper_slice)
+        # if there is no sufficient overlap between the two, take the upper slice segmentation
+        if intersection_flags.sum() / union_flags.sum() < 0.45:
+            axial_slice[:, :] = upper_slice
+
+    return axial_slice
+
+
+def find_ROI_borders(segmentation_slice):
+    """
+    A function that defines the borders of the ROI according to the given segmentation
+    :param segmentation_slice: A segmented slice of L1 according to which the borders of the ROI should be defined
+    :return: The borders for the ROI
+    """
+    max_col = 0
+    while not segmentation_slice[:, max_col].any():
+        max_col += 1
+    max_col += 5
+    min_col = max_col - 55
+
+    min_row = 0
+    while not segmentation_slice[min_row, :].any():
+        min_row += 1
+    max_row = min_row
+    while segmentation_slice[max_row].any():
+        max_row += 1
+    max_row = min_row + int((max_row - min_row) * 0.6)
+
+    return [min_row, max_row, min_col, max_col]
+
+
+def evaluateSegmentation(ground_truth_segmentation_path, estimated_segmentation_path):
+    """
+    A function that evaluates the segmentation of the aorta using Dice coefficient and the Volume Overlap Difference
+    :param ground_truth_segmentation_path: The path to the true segmentation of the aorta as provided in the exercise
+    :param estimated_segmentation_path: The path to the segmentation created in the AortaSegmentation function
+    :return: The VOD and dice coefficient values
+    """
+    true_seg = nib.load(ground_truth_segmentation_path)
+    est_seg = nib.load(estimated_segmentation_path)
+    header = true_seg.header
+
+    true_seg_data = true_seg.get_data()
+    est_seg_data = est_seg.get_data()
+
+    # find borders of segmentation:
+    lower_border = 0
+    while not est_seg_data[:, :, lower_border].any():
+        lower_border += 1
+    upper_border = lower_border
+    while est_seg_data[:, :, upper_border].any():
+        upper_border += 1
+
+    true_seg_data[:, :, :lower_border] = 0
+    true_seg_data[:, :, upper_border:] = 0
+    true_seg_data[true_seg_data != 0] = 1
+
+    pixel_volume = header['pixdim'][1] * header['pixdim'][2] * header['pixdim'][3]
+
+    true_seg_volume = true_seg_data.sum() * pixel_volume
+    est_seg_volume = est_seg_data.sum() * pixel_volume
+    intersection_volume = np.logical_and(true_seg_data, est_seg_data).sum() * pixel_volume
+    union_volume = np.logical_or(true_seg_data, est_seg_data).sum() * pixel_volume
+
+    VOD = 1 - (intersection_volume / union_volume)
+    dice_coefficient = (2 * intersection_volume) / (true_seg_volume + est_seg_volume)
+
+    return VOD, dice_coefficient
+
+
+if __name__ == '__main__':
+    path = "Case1_CT.nii.gz"
+    print('best imin: ', SkeletonTHFinder(path))
+    print(evaluateSegmentation('Case1_Aorta.nii.gz', 'Case1_CT_aorta_segmentation.nii.gz'))
